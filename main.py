@@ -3,6 +3,7 @@ import pandas as pd
 import os
 
 import parse
+import geometry_matrix
 
 def get_obs(rx1_folder_path, rx2_folder_path, obs_file_name:str="obs.rnx", sigma_prd:float=0.7,
             rmc_file_name:str="nmea_simulator.txt", dt:float=0.0,
@@ -63,5 +64,10 @@ if __name__ == "__main__":
     # Parse
     obs_df = get_obs(rx1_folder_path, rx2_folder_path, sigma_prd=sigma_prd, dt=skydel_dt,
                      tacho_quant=sigma_tacho, heading_quant=sigma_heading, sensor_filetype="rmc")
+
+    obs_df = parse.sample(obs_df, sample_size=sample_size, sample_count=10, dump=40)
+
+    # Compute G
+    g_df = geometry_matrix.compute(obs_df, dt=sample_size, min_sv=4, on_cp=True, sv_model=True)
 
     print("All done !")
