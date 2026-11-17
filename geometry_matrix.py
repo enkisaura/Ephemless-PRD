@@ -2,10 +2,12 @@ from typing import Literal
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
+from warnings import warn
 
 import bits
 
 from parse import SENSOR_COL_LIST
+import utils
 
 DEFAULT_GNSS_TABLE = {
     "gal": 29.6e6,
@@ -72,6 +74,7 @@ def get_g_rover(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     return g_rover_df, var_g_rover_df
 
+
 def get_between_epoch_prd(df: pd.DataFrame, meas_col: str, sigma_meas_col:str) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Computes between epochs pseudorange differences alongside its variance.
@@ -92,6 +95,242 @@ def get_between_epoch_prd(df: pd.DataFrame, meas_col: str, sigma_meas_col:str) -
     var_prd_pivot = var_prd_pivot.rolling(2).sum()
 
     return prd_pivot, var_prd_pivot
+
+
+def add_sv_model(g_rover: np.ndarray, var_g_rover: np.ndarray, elapsed_time: np.ndarray, semi_major_axis: float) \
+        -> tuple[np.ndarray, np.ndarray]:
+    g_rover = g_rover.copy()
+    var_g_rover = var_g_rover.copy()
+
+    # Compute constellation apparent period
+    n_sat = np.sqrt(bits.const.NU / (semi_major_axis ** 3))
+    n_app = n_sat - bits.const.OMEGA_E
+
+    # Compute c/s coeff
+    c_tk = np.cos(n_app * elapsed_time)
+    s_tk = np.sin(n_app * elapsed_time)
+
+    # Compute G_rover for rx1
+    c_x = g_rover[:, 0] * c_tk
+    c_y = g_rover[:, 1] * c_tk
+    s_x = g_rover[:, 0] * s_tk
+    s_y = g_rover[:, 1] * s_tk
+
+    g_rover_sv_model = np.vstack([c_x, c_y, s_x, s_y])
+
+    # Compute variance of G_rover for rx1
+    var_c_x = var_g_rover[:, 0] * (c_tk) ** 2
+    var_c_y = var_g_rover[:, 1] * (c_tk) ** 2
+    var_s_x = var_g_rover[:, 0] * (s_tk) ** 2
+    var_s_y = var_g_rover[:, 1] * (s_tk) ** 2
+
+    var_g_rover_sv_model = np.vstack([var_c_x, var_c_y, var_s_x, var_s_y])
+
+    if g_rover.shape[1] > 2:
+        # Compute G_rover for rx2
+        c_x_rx2 = g_rover[:, 2] * c_tk
+        c_y_rx2 = g_rover[:, 3] * c_tk
+        s_x_rx2 = g_rover[:, 2] * s_tk
+        s_y_rx2 = g_rover[:, 3] * s_tk
+
+        g_rover_sv_model = np.vstack([g_rover_sv_model, c_x_rx2, c_y_rx2, s_x_rx2, s_y_rx2])
+
+        # Compute variance of G_rover for rx2
+        var_c_x_rx2 = var_g_rover[:, 2] * (c_tk) ** 2
+        var_c_y_rx2 = var_g_rover[:, 3] * (c_tk) ** 2
+        var_s_x_rx2 = var_g_rover[:, 2] * (s_tk) ** 2
+        var_s_y_rx2 = var_g_rover[:, 3] * (s_tk) ** 2
+
+        var_g_rover_sv_model = np.vstack([var_g_rover_sv_model, var_c_x_rx2, var_c_y_rx2, var_s_x_rx2, var_s_y_rx2])
+
+    return g_rover_sv_model.transpose(), var_g_rover_sv_model.transpose()
+
+
+def add_rx_clock_model(g_rover: np.ndarray, var_g_rover: np.ndarray, elapsed_time: np.ndarray) \
+        -> tuple[np.ndarray, np.ndarray]:
+    g_rover = g_rover.copy()
+    var_g_rover = var_g_rover.copy()
+
+    # Compute ellapsed time factor
+    tho_k = (elapsed_time[0] - elapsed_time) / (elapsed_time[-1] - elapsed_time[0]).reshape(-1, 1)
+
+    # Compute G_rover relative clock bias factors
+    b0 = np.ones_like(g_rover).reshape(-1, 1)
+    b1 = tho_k
+    b2 = tho_k ** 2
+
+    g_rover_clock_bias = np.hstack([g_rover, b0, b1, b2])
+
+    # Compute variance of G_rover relative clock bias factors
+    var_b0 = np.zeros_like(var_g_rover[:, 0]).reshape(-1, 1)
+    var_b1 = np.zeros_like(var_g_rover[:, 0]).reshape(-1, 1)
+    var_b2 = np.zeros_like(var_g_rover[:, 0]).reshape(-1, 1)
+
+    var_g_rover_clock_bias = np.hstack([var_g_rover, var_b0, var_b1, var_b2])
+
+    return g_rover_clock_bias, var_g_rover_clock_bias
+
+def clock_bias_correction(prd: np.ndarray, var_prd: np.ndarray, g_rover: np.ndarray, var_g_rover: np.ndarray,
+                          elapsed_time: np.ndarray, constellation_table: np.ndarray,
+                          gnss_table: dict = DEFAULT_GNSS_TABLE, sv_model: bool = False) \
+        -> tuple[np.ndarray, float, float, float]:
+
+
+    for gnss_id in np.unique(constellation_table): # Iterate over each GNSS constellation
+        ## Extract GNSS observables
+        const_mask = (constellation_table == gnss_id)
+        const_prd = prd[:, const_mask]
+        const_var_prd = var_prd[:, const_mask]
+
+        # Build G_rover_extended
+        if sv_model:
+            g_rover_extended, var_g_rover_extended = add_sv_model(g_rover, var_g_rover, elapsed_time, gnss_table[gnss_id])
+        else:
+            g_rover_extended = g_rover
+            var_g_rover_extended = var_g_rover
+
+        g_rover_extended, var_g_rover_extended = add_rx_clock_model(g_rover_extended, var_g_rover_extended, elapsed_time)
+
+
+def angle_bias_correction():
+    pass
+
+
+def reduce_g_rover():
+    pass
+
+
+def old_correc_clock_bias(prd: np.ndarray, var_prd: np.ndarray, g_rover: np.ndarray, var_g_rover: np.ndarray,
+                          elapsed_time: np.ndarray, constellation_table: np.ndarray,
+                          gnss_table: dict = DEFAULT_GNSS_TABLE, sv_model: bool = False) \
+        -> tuple[np.ndarray, float, float, float]:
+
+    # 0. Organize by constellation
+    b_0_list = []
+    b_1_list = []
+    b_2_list = []
+    var_b_list = []
+    all_PRD = PRD
+    all_var_y = var_y
+    constellation_table = np.array(constellation_table)
+    tho_k = (dt[0] - dt) / (dt[-1] - dt[0])
+
+    for cle in np.unique(constellation_table):
+        mask = (constellation_table == cle)
+        PRD = all_PRD[:, mask]
+        var_y = all_var_y[:, mask]
+
+        n_sat = np.sqrt(bits.const.NU / (semi_major_axis_table[cle] ** 3))
+        n_app = n_sat - bits.const.OMEGA_E
+
+        c_tk = np.cos(n_app * dt)
+        s_tk = np.sin(n_app * dt)
+
+        G_rover_extended_0 = G_rover[:, 0] * c_tk
+        G_rover_extended_1 = G_rover[:, 1] * c_tk
+        G_rover_extended_2 = G_rover[:, 0] * s_tk
+        G_rover_extended_3 = G_rover[:, 1] * s_tk
+
+        G_rover_extended_4 = G_rover[:, 2] * c_tk
+        G_rover_extended_5 = G_rover[:, 3] * c_tk
+        G_rover_extended_6 = G_rover[:, 2] * s_tk
+        G_rover_extended_7 = G_rover[:, 3] * s_tk
+
+        G_rover_extended_b0 = np.ones_like(G_rover_extended_0)
+        G_rover_extended_b1 = tho_k
+        G_rover_extended_b2 = tho_k ** 2
+
+        G_rover_extended = np.vstack([G_rover_extended_0, G_rover_extended_1, G_rover_extended_2, G_rover_extended_3,
+                                      G_rover_extended_4, G_rover_extended_5, G_rover_extended_6, G_rover_extended_7,
+                                      G_rover_extended_b0, G_rover_extended_b1, G_rover_extended_b2]).transpose()
+
+        var_g_extended_0 = var_g[:, 0] * (c_tk)**2
+        var_g_extended_1 = var_g[:, 1] * (c_tk)**2
+        var_g_extended_2 = var_g[:, 0] * (s_tk)**2
+        var_g_extended_3 = var_g[:, 1] * (s_tk)**2
+
+        var_g_extended_4 = var_g[:, 2] * (c_tk)**2
+        var_g_extended_5 = var_g[:, 3] * (c_tk)**2
+        var_g_extended_6 = var_g[:, 2] * (s_tk)**2
+        var_g_extended_7 = var_g[:, 3] * (s_tk)**2
+
+        var_g_extended_b0 = np.zeros_like(var_g_extended_0)
+        var_g_extended_b1 = np.zeros_like(var_g_extended_0)
+        var_g_extended_b2 = np.zeros_like(var_g_extended_0)
+
+        var_g_extended = np.vstack([var_g_extended_0, var_g_extended_1, var_g_extended_2, var_g_extended_3,
+                                          var_g_extended_4, var_g_extended_5, var_g_extended_6, var_g_extended_7,
+                                          var_g_extended_b0, var_g_extended_b1, var_g_extended_b2]).transpose()
+
+        #Q_G = np.diag(vec(var_g_extended)[0].flatten())
+        Q_G = var_g_extended
+
+        # 1. rough estimate
+        if True:
+            for i in range(var_y.shape[1]):
+                Q_y = np.diag(var_y[:, i])
+                Y = PRD[:, i].reshape(-1, 1)
+                X, Q_x = utils.wtls(Y=Y, Q_y=Q_y, G=G_rover_extended.copy(), Q_g=Q_G.copy())
+
+                b_0_list.append(X[8, 0])
+                b_1_list.append(X[9, 0])
+                b_2_list.append(X[10, 0])
+
+                var_b_list.append(Q_x[8:, 8:])
+        else:
+            G = ols(G_rover_extended, PRD)
+
+            b_0_list += G[8].tolist()
+            b_1_list += G[9].tolist()
+            b_2_list += G[10].tolist()
+
+
+    # 2 correct clock bias
+    b_0 = np.median(b_0_list)
+    b_1 = np.median(b_1_list)
+    b_2 = np.median(b_2_list)
+
+    b_cov = utils.cov_mediane(var_b_list)
+
+    # T = [[np.ones(1)], tho_k, tho_k**2]
+    # B = [[b_0, b_1, b_2]]
+    # corr_prd = all_PRD - (T @ B)
+    # cov(corr_prd) = cov(all_prd) - T @ cov(B) @ T^T
+
+    T = np.array([np.ones(tho_k.shape[0]), tho_k, tho_k**2]).transpose()
+    B = np.array([[b_0], [b_1], [b_2]])
+
+    corr_PRD = all_PRD - (T @ B)
+
+    var_corr_prd = all_var_y + np.diag(T @ b_cov @ T.transpose()).reshape(-1, 1)
+
+    return corr_PRD, var_corr_prd, B, b_cov
+
+
+def compute_window(prd: np.ndarray, var_prd: np.ndarray, g_rover: np.ndarray, var_g_rover: np.ndarray,
+                   elapsed_time: np.ndarray, constellation_table:np.ndarray,
+                   gnss_table: dict = DEFAULT_GNSS_TABLE, sv_model: bool = False) -> pd.DataFrame|None:
+    ## Check inputs
+    if sv_model and constellation_table is None:
+        raise ValueError("Constellation table must be provided for SV model computation")
+
+    if g_rover.shape[0] < g_rover.shape[1]:
+        txt = f"Not enough measurements, need at least {g_rover.shape[1]}, got {g_rover.shape[0]}"
+        warn(txt)
+        return None
+
+    if g_rover.shape[0] != prd.shape[0]:
+        txt = f"PRD measurements and rover geometry matrix are not the same length ({prd.shape[0]}, {g_rover.shape[0]})"
+        warn(txt)
+        return None
+
+    # 1. Reduce G_rover
+    #try:
+    if sv_model:
+        corr_PRD, var_corr_prd, B, b_cov = correc_clock_bias(PRD, var_y, G_rover, var_g, constellation_table, dt, semi_major_axis_table)
+        G_rover, var_G_rover, gamma = reduce_g_rover_dyn(corr_PRD, var_corr_prd, G_rover, var_g, constellation_table, dt, semi_major_axis_table)
+    else:
+        G_rover, gamma = reduce_g_rover(PRD, G_rover, dt)
 
 
 def compute(df: pd.DataFrame, dt: float, min_sv: int = 4, on_cp: bool = True, sv_model: bool = True,
@@ -141,10 +380,11 @@ def compute(df: pd.DataFrame, dt: float, min_sv: int = 4, on_cp: bool = True, sv
         # Find SV that are valid along the entirety of the window
         mask_complete = at_epoch_prd_df.notna().all(axis=0)
         sv_list = at_epoch_prd_df.columns[mask_complete].tolist()
+
+        # Extract used GNSS id table for sv model
         constellation_table = []
         for sv_id in sv_list:
             constellation_table.append(sv_id[:3])
-
         constellation_table = np.array(constellation_table)
 
         # Check if window is solvable
@@ -164,169 +404,3 @@ def compute(df: pd.DataFrame, dt: float, min_sv: int = 4, on_cp: bool = True, sv
                                 elapsed_time=elapsed_time_np,
                                 constellation_table=constellation_table, gnss_table=gnss_table, sv_model=sv_model)
 
-
-
-def compute_window(prd: np.ndarray, var_prd: np.ndarray, g_rover: np.ndarray, var_g_rover: np.ndarray,
-                   elapsed_time: np.ndarray, constellation_table:np.ndarray|None=None,
-                   gnss_table: dict = DEFAULT_GNSS_TABLE, sv_model: bool = True) -> pd.DataFrame:
-    pass
-
-
-def old_compute_geometry_matrix(df: pd.DataFrame, dt: float, min_sv: int = 4, mode: Literal["sd", "dd"] = "dd",
-                            on_cp: bool = True,
-                            dynamic_sv: bool = True, semi_major_axis_table: dict = {"gal": 29.6e6,
-                                                                                    "gps": 26.56e6,
-                                                                                    "glo": 25.508e6,
-                                                                                    "bei": 27.878e6}) -> pd.DataFrame:
-    # Clean up
-    df = df.sort_values("time").reset_index(drop=True)
-    delta = np.timedelta64(dt, "s")
-
-    # Initialize results columns
-    df["gamma_rad"] = np.nan
-    df["e_x"] = np.nan
-    df["e_y"] = np.nan
-
-    # Extract measurements
-    if dynamic_sv:
-        if mode == "dd":
-            df = df[df["gnss_id1"] == df["gnss_id2"]]
-            gnss_id_column = "gnss_id1"
-        else:
-            gnss_id_column = "gnss_id_rx1"
-        df = df.sort_values(by=["time", gnss_id_column]).reset_index(drop=True)
-
-    if on_cp:
-        meas_col = mode + "_cp"
-    else:
-        meas_col = mode
-
-    pivot_full = df.pivot_table(index="time", columns="sv_id", values=meas_col, aggfunc="first")
-    sigma_pivot_full = df.pivot_table(index="time", columns="sv_id", values="sigma_prd", aggfunc="first")
-    sensors_full = df.groupby("time")[["displacement_m_rx1", "heading_rad_rx1",
-                                       "displacement_m_rx2", "heading_rad_rx2"]].first()
-    sigma_sensors_full = df.groupby("time")[["sigma_displacement_m_rx1", "sigma_heading_rad_rx1",
-                                             "sigma_displacement_m_rx2", "sigma_heading_rad_rx2"]].first()
-
-    # Compute between-epochs differences
-    pivot_full = pivot_full.diff()
-    sigma_sensors_full = np.sqrt(2) * sigma_sensors_full  # If prd independent wich is not true...
-
-    # Compute 2D displacement from heading + displacement
-    """
-    d_x = cos(heading) * d
-    d_y = sin(heading) * d
-
-    var_dx = d² * sin(heading)² * var_heading + cos(heading)² * var_d
-    var_dy = d² * cos(heading)² * var_heading + sin(heading)² * var_d
-    """
-    db_full = pd.DataFrame()
-    db_full["db_x1"] = np.cos(sensors_full["heading_rad_rx1"]) * sensors_full["displacement_m_rx1"]
-    db_full["db_y1"] = np.sin(sensors_full["heading_rad_rx1"]) * sensors_full["displacement_m_rx1"]
-    db_full["db_x2"] = np.cos(sensors_full["heading_rad_rx2"]) * sensors_full["displacement_m_rx2"]
-    db_full["db_y2"] = np.sin(sensors_full["heading_rad_rx2"]) * sensors_full["displacement_m_rx2"]
-
-    var_db_full = pd.DataFrame()
-    var_db_full["db_x1"] = (sensors_full["displacement_m_rx1"] ** 2 * np.sin(sensors_full["heading_rad_rx1"]) ** 2 *
-                            sigma_sensors_full["sigma_heading_rad_rx1"] ** 2
-                            + np.cos(sensors_full["heading_rad_rx1"]) ** 2 * sigma_sensors_full[
-                                "sigma_displacement_m_rx1"] ** 2)
-    var_db_full["db_y1"] = (sensors_full["displacement_m_rx1"] ** 2 * np.cos(sensors_full["heading_rad_rx1"]) ** 2 *
-                            sigma_sensors_full["sigma_heading_rad_rx1"] ** 2
-                            + np.sin(sensors_full["heading_rad_rx1"]) ** 2 * sigma_sensors_full[
-                                "sigma_displacement_m_rx1"] ** 2)
-    var_db_full["db_x2"] = (sensors_full["displacement_m_rx2"] ** 2 * np.sin(sensors_full["heading_rad_rx2"]) ** 2 *
-                            sigma_sensors_full["sigma_heading_rad_rx2"] ** 2
-                            + np.cos(sensors_full["heading_rad_rx2"]) ** 2 * sigma_sensors_full[
-                                "sigma_displacement_m_rx2"] ** 2)
-    var_db_full["db_y2"] = (sensors_full["displacement_m_rx2"] ** 2 * np.cos(sensors_full["heading_rad_rx2"]) ** 2 *
-                            sigma_sensors_full["sigma_heading_rad_rx2"] ** 2
-                            + np.sin(sensors_full["heading_rad_rx2"]) ** 2 * sigma_sensors_full[
-                                "sigma_displacement_m_rx2"] ** 2)
-
-    # Geat rid of first timestamp
-    pivot_full = pivot_full.iloc[1:]
-    db_full = db_full.iloc[1:]
-    sigma_pivot_full = sigma_pivot_full.iloc[1:]
-    var_db_full = var_db_full.iloc[1:]
-
-    # Compute geometry matrix for each windows of dt seconds
-    all_times = pivot_full.index.values
-    n_times_total = len(all_times)
-    end_index = 0
-    for start_index in tqdm(range(n_times_total), desc="Computing geometry matrix", total=n_times_total - dt):
-        t_start = all_times[start_index]
-        t_end = t_start + delta
-
-        # Find end of window of size dt seconds
-        while end_index < n_times_total and all_times[end_index] < t_end:
-            end_index += 1
-        if end_index >= n_times_total:
-            break
-
-        # Extract window
-        window_times = all_times[start_index:end_index]
-        if len(window_times) == 0:
-            continue
-
-        prd_pivot = pivot_full.iloc[start_index:end_index]
-        sigma_prd_pivot = sigma_pivot_full.iloc[start_index:end_index]
-
-        G_rover = db_full.iloc[start_index:end_index].to_numpy()
-        var_g = var_db_full.iloc[start_index:end_index].to_numpy()
-
-        # Find SV that are valid along the entirety of the window
-        mask_complete = prd_pivot.notna().all(axis=0)
-        sv_list = prd_pivot.columns[mask_complete].tolist()
-        constellation_table = []
-        for sv_id in sv_list:
-            constellation_table.append(sv_id[:3])
-
-        constellation_table = np.array(constellation_table)
-
-        # Check if window is solvable
-        if len(sv_list) <= min_sv or len(sv_list) < G_rover.shape[1]:
-            continue
-
-        # Extract PRD matrix with only valid SV
-        PRD = prd_pivot[sv_list].to_numpy()
-        var_y = (sigma_prd_pivot[sv_list].to_numpy()) ** 2
-
-        # Extract timestamps
-        dt_np = bits.convert.time.utc_to_seconds(window_times) / np.timedelta64(1, "s")
-
-        # Compute geometry matrix
-        result = window_geometry_matrix(PRD, var_y, G_rover, var_g, constellation_table, dt_np, semi_major_axis_table,
-                                        dynamic_sv=dynamic_sv, mode=mode)
-
-        if result is None:
-            txt = f"Could not compute geometry matrix between {all_times[start_index]} and {all_times[end_index]}"
-            warn(txt)
-            continue
-
-        # Save results
-        G, Q_G, gamma = result
-        time_mask = df["time"] == window_times[-1]
-
-        # Map used lines in the window dataframe
-        window_map = time_mask & (df["sv_id"].isin(sv_list))
-
-        # Map SV line index in the window dataframe with corresponding id from sv_list
-        sv_to_col = {sv_name: i for i, sv_name in enumerate(sv_list)}  # map sv_name with sv_list id
-        col_idx = df.loc[time_mask, "sv_id"].map(sv_to_col)  # Map dataframe lines with corresponding id from sv_list
-        valid = col_idx.notna()  # Find valid SV
-        sv_map_idx = col_idx[valid].astype(int)  # Keep only valid SV
-
-        # Gamma
-        df.loc[window_map, "gamma_rad"] = gamma
-
-        # G
-        df.loc[window_map, "e_x"] = G[0, sv_map_idx.to_numpy()]
-        df.loc[window_map, "e_y"] = G[1, sv_map_idx.to_numpy()]
-
-        # Q_G
-        df.loc[window_map, "sigma_e_xx"] = Q_G[sv_map_idx.to_numpy(), 0, 0]
-        df.loc[window_map, "sigma_e_yy"] = Q_G[sv_map_idx.to_numpy(), 1, 1]
-        df.loc[window_map, "sigma_e_xy"] = Q_G[sv_map_idx.to_numpy(), 0, 1]
-
-    return df

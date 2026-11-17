@@ -105,3 +105,25 @@ def wtls(Y:np.ndarray, Q_y:np.ndarray, G:np.ndarray, Q_g:np.ndarray, threshold=1
     Q_x = sigma_2 * np.linalg.inv(N)
 
     return (x[:, None] if np.ndim(Y) == 2 else x), Q_x
+
+def wtls_2D(Y:np.ndarray, Q_y:np.ndarray, G:np.ndarray, Q_g:np.ndarray, threshold=1e-4, max_iterations=20) \
+        -> Tuple[np.ndarray, np.ndarray]:
+    for i in range(var_y.shape[1]):
+        Q_y = np.diag(var_y[:, i])
+        Y = PRD[:, i].reshape(-1, 1)
+        X, Q_x = utils.wtls(Y=Y, Q_y=Q_y, G=G_rover_extended.copy(), Q_g=Q_G.copy())
+
+        b_0_list.append(X[8, 0])
+        b_1_list.append(X[9, 0])
+        b_2_list.append(X[10, 0])
+
+        var_b_list.append(Q_x[8:, 8:])
+
+def cov_mediane(cov_list):
+    """cov_list : liste de N matrices de covariance (p, p), une par vecteur."""
+    cov_list = np.stack([np.asarray(S, dtype=float) for S in cov_list])  # (N, p, p)
+    sig = np.sqrt(np.diagonal(cov_list, axis1=1, axis2=2))             # (N, p)
+    rho = cov_list / (sig[:, :, None] * sig[:, None, :])                # (N, p, p)
+    num = np.arcsin(np.clip(rho, -1, 1)).sum(axis=0)                  # (p, p)
+    S = (1 / sig).sum(axis=0)                                         # (p,)
+    return num / np.outer(S, S)
