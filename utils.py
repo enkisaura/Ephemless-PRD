@@ -106,24 +106,48 @@ def wtls(Y:np.ndarray, Q_y:np.ndarray, G:np.ndarray, Q_g:np.ndarray, threshold=1
 
     return (x[:, None] if np.ndim(Y) == 2 else x), Q_x
 
+
 def wtls_2D(Y:np.ndarray, Q_y:np.ndarray, G:np.ndarray, Q_g:np.ndarray, threshold=1e-4, max_iterations=20) \
         -> Tuple[np.ndarray, np.ndarray]:
-    for i in range(var_y.shape[1]):
-        Q_y = np.diag(var_y[:, i])
-        Y = PRD[:, i].reshape(-1, 1)
-        X, Q_x = utils.wtls(Y=Y, Q_y=Q_y, G=G_rover_extended.copy(), Q_g=Q_G.copy())
+    X_list = []
+    Q_x_list = []
+    for i in range(Y.shape[1]):
+        if Q_y.ndim == 2: # Q_y contains the variances of Y
+            local_Q_y = np.diag(Q_y[:, i])
+        elif Q_y.ndim == 3: # Q_y contains the variance-covariances of Y
+            local_Q_y = Q_y[i]
+        else:
+            raise TypeError("Q_y must either be a 2d variance or a 3d variance-covariance matrix.")
+        local_Y = Y[:, i].reshape(-1, 1)
+        local_X, local_Q_x = wtls(Y=local_Y, Q_y=local_Q_y, G=G, Q_g=Q_g,
+                                  threshold=threshold, max_iterations=max_iterations)
 
-        b_0_list.append(X[8, 0])
-        b_1_list.append(X[9, 0])
-        b_2_list.append(X[10, 0])
+        X_list.append(local_X)
+        Q_x_list.append(local_Q_x)
 
-        var_b_list.append(Q_x[8:, 8:])
+    X = np.hstack(X_list).transpose()
+    Q_x = np.stack(Q_x_list)
 
-def cov_mediane(cov_list):
-    """cov_list : liste de N matrices de covariance (p, p), une par vecteur."""
-    cov_list = np.stack([np.asarray(S, dtype=float) for S in cov_list])  # (N, p, p)
-    sig = np.sqrt(np.diagonal(cov_list, axis1=1, axis2=2))             # (N, p)
-    rho = cov_list / (sig[:, :, None] * sig[:, None, :])                # (N, p, p)
+    return X, Q_x
+
+
+
+def cov_mediane(Q: list|np.ndarray) -> np.ndarray:
+    """Q : liste de N matrices de covariance (p, p), une par vecteur ou matrice (N, p, p)"""
+    if type(Q) is list:
+        Q = np.stack([np.asarray(S, dtype=float) for S in Q])  # (N, p, p)
+    else:
+        if type(Q) is not np.ndarray:
+            raise TypeError("Q must be a list or numpy array")
+        if Q.shape[1] != Q.shape[2]:
+            raise ValueError("Q must be of shape (N, p, p)")
+
+    sig = np.sqrt(np.diagonal(Q, axis1=1, axis2=2))             # (N, p)
+    rho = Q / (sig[:, :, None] * sig[:, None, :])                # (N, p, p)
     num = np.arcsin(np.clip(rho, -1, 1)).sum(axis=0)                  # (p, p)
     S = (1 / sig).sum(axis=0)                                         # (p,)
     return num / np.outer(S, S)
+
+def cov_arctan2(a, b, var_a, var_b, cov_ab=0.0):
+    r2 = a**2 + b**2
+    return (b**2 * var_a + a**2 * var_b - 2 * a * b * cov_ab) / r2**2

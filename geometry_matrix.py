@@ -151,31 +151,29 @@ def add_rx_clock_model(g_rover: np.ndarray, var_g_rover: np.ndarray, elapsed_tim
     g_rover = g_rover.copy()
     var_g_rover = var_g_rover.copy()
 
-    # Compute ellapsed time factor
-    tho_k = (elapsed_time[0] - elapsed_time) / (elapsed_time[-1] - elapsed_time[0]).reshape(-1, 1)
-
-    # Compute G_rover relative clock bias factors
-    b0 = np.ones_like(g_rover).reshape(-1, 1)
-    b1 = tho_k
-    b2 = tho_k ** 2
-
-    g_rover_clock_bias = np.hstack([g_rover, b0, b1, b2])
+    g_rover_clock_bias = np.hstack([g_rover, clock_model(elapsed_time)])
 
     # Compute variance of G_rover relative clock bias factors
-    var_b0 = np.zeros_like(var_g_rover[:, 0]).reshape(-1, 1)
-    var_b1 = np.zeros_like(var_g_rover[:, 0]).reshape(-1, 1)
-    var_b2 = np.zeros_like(var_g_rover[:, 0]).reshape(-1, 1)
-
-    var_g_rover_clock_bias = np.hstack([var_g_rover, var_b0, var_b1, var_b2])
+    var_b = np.zeros((var_g_rover.shape[0], 3)) # Variances for b0, b1, b2 are set to 0
+    var_g_rover_clock_bias = np.hstack([var_g_rover, var_b])
 
     return g_rover_clock_bias, var_g_rover_clock_bias
+
+
+def clock_model(elapsed_time: np.ndarray) -> np.ndarray:
+    tho_k = ((elapsed_time[0] - elapsed_time) / (elapsed_time[-1] - elapsed_time[0]))
+    clock_model = np.array([np.ones(tho_k.shape[0]), tho_k, tho_k ** 2])
+    return clock_model.transpose()
+
 
 def clock_bias_correction(prd: np.ndarray, var_prd: np.ndarray, g_rover: np.ndarray, var_g_rover: np.ndarray,
                           elapsed_time: np.ndarray, constellation_table: np.ndarray,
                           gnss_table: dict = DEFAULT_GNSS_TABLE, sv_model: bool = False) \
-        -> tuple[np.ndarray, float, float, float]:
+        -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
 
-
+    ## Estimate relative clock biases (b0, b1, b2)
+    b_list = []
+    var_b_list = []
     for gnss_id in np.unique(constellation_table): # Iterate over each GNSS constellation
         ## Extract GNSS observables
         const_mask = (constellation_table == gnss_id)
@@ -191,120 +189,157 @@ def clock_bias_correction(prd: np.ndarray, var_prd: np.ndarray, g_rover: np.ndar
 
         g_rover_extended, var_g_rover_extended = add_rx_clock_model(g_rover_extended, var_g_rover_extended, elapsed_time)
 
+        X, Q_x = utils.wtls_2D(Y=const_prd, Q_y=const_var_prd, G=g_rover_extended, Q_g=var_g_rover_extended)
 
-def angle_bias_correction():
-    pass
+        # Keep only the 3 last values that correspond to relative clock bias
+        b_list.append(X[:, -3:])
+        var_b_list.append(Q_x[:, -3:, -3:])
+
+    ## Merge clock biases coeff estimates into a single clock estimate
+    b_all_sv = np.vstack(b_list)
+    b = np.median(b_all_sv, axis=0).reshape(-1, 1)
+
+    var_b_all_sv = np.vstack(var_b_list)
+    var_b = utils.cov_mediane(var_b_all_sv)
+
+    ## Correct prd with estimated relative clock bias
+    tho = clock_model(elapsed_time)
+    clock_bias = (tho @ b)
+    corr_prd = prd - clock_bias
+
+    cov_clock_bias = tho @ var_b @ tho.transpose()
+    Q_corr_prd_list = []
+    for i in range(var_prd.shape[1]):
+        local_Q_corr_prd = np.diag(var_prd[:, i]) + cov_clock_bias
+        Q_corr_prd_list.append(local_Q_corr_prd)
+    Q_corr_prd = np.stack(Q_corr_prd_list)
+
+    return corr_prd, Q_corr_prd, clock_bias, cov_clock_bias
 
 
-def reduce_g_rover():
-    pass
-
-
-def old_correc_clock_bias(prd: np.ndarray, var_prd: np.ndarray, g_rover: np.ndarray, var_g_rover: np.ndarray,
+def angle_bias_correction(prd: np.ndarray, Q_prd: np.ndarray, g_rover: np.ndarray, var_g_rover: np.ndarray,
                           elapsed_time: np.ndarray, constellation_table: np.ndarray,
                           gnss_table: dict = DEFAULT_GNSS_TABLE, sv_model: bool = False) \
-        -> tuple[np.ndarray, float, float, float]:
+        -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ## G estimation
+    G_list = []
+    Q_g_list = []
+    for gnss_id in np.unique(constellation_table): # Iterate over each GNSS constellation
+        # Extract GNSS observables
+        const_mask = (constellation_table == gnss_id)
+        const_prd = prd[:, const_mask]
+        const_Q_prd = Q_prd[const_mask]
 
-    # 0. Organize by constellation
-    b_0_list = []
-    b_1_list = []
-    b_2_list = []
-    var_b_list = []
-    all_PRD = PRD
-    all_var_y = var_y
-    constellation_table = np.array(constellation_table)
-    tho_k = (dt[0] - dt) / (dt[-1] - dt[0])
-
-    for cle in np.unique(constellation_table):
-        mask = (constellation_table == cle)
-        PRD = all_PRD[:, mask]
-        var_y = all_var_y[:, mask]
-
-        n_sat = np.sqrt(bits.const.NU / (semi_major_axis_table[cle] ** 3))
-        n_app = n_sat - bits.const.OMEGA_E
-
-        c_tk = np.cos(n_app * dt)
-        s_tk = np.sin(n_app * dt)
-
-        G_rover_extended_0 = G_rover[:, 0] * c_tk
-        G_rover_extended_1 = G_rover[:, 1] * c_tk
-        G_rover_extended_2 = G_rover[:, 0] * s_tk
-        G_rover_extended_3 = G_rover[:, 1] * s_tk
-
-        G_rover_extended_4 = G_rover[:, 2] * c_tk
-        G_rover_extended_5 = G_rover[:, 3] * c_tk
-        G_rover_extended_6 = G_rover[:, 2] * s_tk
-        G_rover_extended_7 = G_rover[:, 3] * s_tk
-
-        G_rover_extended_b0 = np.ones_like(G_rover_extended_0)
-        G_rover_extended_b1 = tho_k
-        G_rover_extended_b2 = tho_k ** 2
-
-        G_rover_extended = np.vstack([G_rover_extended_0, G_rover_extended_1, G_rover_extended_2, G_rover_extended_3,
-                                      G_rover_extended_4, G_rover_extended_5, G_rover_extended_6, G_rover_extended_7,
-                                      G_rover_extended_b0, G_rover_extended_b1, G_rover_extended_b2]).transpose()
-
-        var_g_extended_0 = var_g[:, 0] * (c_tk)**2
-        var_g_extended_1 = var_g[:, 1] * (c_tk)**2
-        var_g_extended_2 = var_g[:, 0] * (s_tk)**2
-        var_g_extended_3 = var_g[:, 1] * (s_tk)**2
-
-        var_g_extended_4 = var_g[:, 2] * (c_tk)**2
-        var_g_extended_5 = var_g[:, 3] * (c_tk)**2
-        var_g_extended_6 = var_g[:, 2] * (s_tk)**2
-        var_g_extended_7 = var_g[:, 3] * (s_tk)**2
-
-        var_g_extended_b0 = np.zeros_like(var_g_extended_0)
-        var_g_extended_b1 = np.zeros_like(var_g_extended_0)
-        var_g_extended_b2 = np.zeros_like(var_g_extended_0)
-
-        var_g_extended = np.vstack([var_g_extended_0, var_g_extended_1, var_g_extended_2, var_g_extended_3,
-                                          var_g_extended_4, var_g_extended_5, var_g_extended_6, var_g_extended_7,
-                                          var_g_extended_b0, var_g_extended_b1, var_g_extended_b2]).transpose()
-
-        #Q_G = np.diag(vec(var_g_extended)[0].flatten())
-        Q_G = var_g_extended
-
-        # 1. rough estimate
-        if True:
-            for i in range(var_y.shape[1]):
-                Q_y = np.diag(var_y[:, i])
-                Y = PRD[:, i].reshape(-1, 1)
-                X, Q_x = utils.wtls(Y=Y, Q_y=Q_y, G=G_rover_extended.copy(), Q_g=Q_G.copy())
-
-                b_0_list.append(X[8, 0])
-                b_1_list.append(X[9, 0])
-                b_2_list.append(X[10, 0])
-
-                var_b_list.append(Q_x[8:, 8:])
+        # Build G_rover_extended
+        if sv_model:
+            g_rover_extended, var_g_rover_extended = add_sv_model(g_rover, var_g_rover, elapsed_time,
+                                                                  gnss_table[gnss_id])
         else:
-            G = ols(G_rover_extended, PRD)
+            g_rover_extended = g_rover
+            var_g_rover_extended = var_g_rover
 
-            b_0_list += G[8].tolist()
-            b_1_list += G[9].tolist()
-            b_2_list += G[10].tolist()
+        local_G, local_Q_g = utils.wtls_2D(Y=const_prd, Q_y=const_Q_prd, G=g_rover_extended, Q_g=var_g_rover_extended)
 
+        G_list.append(local_G)
+        Q_g_list.append(local_Q_g)
 
-    # 2 correct clock bias
-    b_0 = np.median(b_0_list)
-    b_1 = np.median(b_1_list)
-    b_2 = np.median(b_2_list)
+    G_all_sv = np.vstack(G_list)
+    Q_g_all_sv = np.vstack(Q_g_list)
 
-    b_cov = utils.cov_mediane(var_b_list)
+    ## Angle in G estimation
+    if not sv_model:
+        m1 = -G_all_sv[:, :2]
+        m2 = G_all_sv[:, 2:]
+        q_m1 = np.vstack([Q_g_all_sv[:, 0, 0], Q_g_all_sv[:, 1, 1]]).transpose()
+        q_m2 = np.vstack([Q_g_all_sv[:, 2, 2], Q_g_all_sv[:, 3, 3]]).transpose()
+        cos_a, sin_a, var_cos_a, var_sin_a = compute_angle_between_matrix(m1, m2, q_m1, q_m2)
+    else:
+        # First angle
+        m1 = -G_all_sv[:, 0:2]
+        m2 = G_all_sv[:, 4:6]
+        q_m1 = np.vstack([Q_g_all_sv[:, 0, 0], Q_g_all_sv[:, 1, 1]]).transpose()
+        q_m2 = np.vstack([Q_g_all_sv[:, 4, 4], Q_g_all_sv[:, 5, 5]]).transpose()
+        cos_a1, sin_a1, var_cos_a1, var_sin_a1 = compute_angle_between_matrix(m1, m2, q_m1, q_m2)
 
-    # T = [[np.ones(1)], tho_k, tho_k**2]
-    # B = [[b_0, b_1, b_2]]
-    # corr_prd = all_PRD - (T @ B)
-    # cov(corr_prd) = cov(all_prd) - T @ cov(B) @ T^T
+        # Second angle
+        m1 = -G_all_sv[:, 2:4]
+        m2 = G_all_sv[:, 6:8]
+        q_m1 = np.vstack([Q_g_all_sv[:, 2, 2], Q_g_all_sv[:, 3, 3]]).transpose()
+        q_m2 = np.vstack([Q_g_all_sv[:, 6, 6], Q_g_all_sv[:, 7, 7]]).transpose()
+        cos_a2, sin_a2, var_cos_a2, var_sin_a2 = compute_angle_between_matrix(m1, m2, q_m1, q_m2)
 
-    T = np.array([np.ones(tho_k.shape[0]), tho_k, tho_k**2]).transpose()
-    B = np.array([[b_0], [b_1], [b_2]])
+        # Merge
+        cos_a = np.mean([cos_a1, cos_a2])
+        sin_a = np.mean([sin_a1, sin_a2])
+        var_cos_a = (var_cos_a1 + var_cos_a2)/4
+        var_sin_a = (var_sin_a1 + var_sin_a2)/4
 
-    corr_PRD = all_PRD - (T @ B)
+        a = np.arctan2(sin_a, cos_a)
+        var_a = utils.cov_arctan2(sin_a, cos_a, var_sin_a, var_cos_a)
 
-    var_corr_prd = all_var_y + np.diag(T @ b_cov @ T.transpose()).reshape(-1, 1)
+    ## Correct angle bias
+    g_rover_x_corrected = - g_rover[:, 0] + cos_a * g_rover[:, 2] - sin_a * g_rover[:, 3]
+    g_rover_y_corrected = - g_rover[:, 1] + cos_a * g_rover[:, 3] + sin_a * g_rover[:, 2]
+    g_rover_corrected = np.column_stack([g_rover_x_corrected, g_rover_y_corrected])
 
-    return corr_PRD, var_corr_prd, B, b_cov
+    var_g_rover_x_corrected = (var_g_rover[:, 0]
+                             + var_cos_a * (g_rover[:, 2]**2) + var_g_rover[:, 2] * cos_a**2 + var_cos_a * var_g_rover[:, 2]
+                             + var_sin_a * (g_rover[:, 3]**2) + var_g_rover[:, 3] * sin_a**2 + var_sin_a * var_g_rover[:, 3])
+    var_g_rover_y_corrected = (var_g_rover[:, 1]
+                             + var_cos_a * (g_rover[:, 3]**2) + var_g_rover[:, 3] * cos_a**2 + var_cos_a * var_g_rover[:, 3]
+                             + var_sin_a * (g_rover[:, 2]**2) + var_g_rover[:, 2] * sin_a**2 + var_sin_a * var_g_rover[:, 2])
+    var_g_rover_corrected = np.column_stack([var_g_rover_x_corrected, var_g_rover_y_corrected])
+
+    return g_rover_corrected, var_g_rover_corrected, a, var_a
+
+def compute_angle_between_matrix(M1: np.ndarray, M2: np.ndarray, Q_m1:np.ndarray, Q_m2:np.ndarray) \
+        -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Mi = [[x_1i, y_1i],
+          [x_2i, y_2i],
+              ...
+          [x_ni, y_ni]]
+
+    M2 = M1 @ [[cos(alpha), -sin(alpha)],
+               [sin(alpha), cos(alpha)]]
+
+    :param M1:
+    :param M2:
+    :param Q_m1:
+    :param Q_m2:
+    :return:
+    """
+    angle_matrix, Q_angle_matrix = utils.wtls_2D(Y=M2, Q_y=Q_m2, G=M1, Q_g=Q_m1)
+
+    U, S, Vt = np.linalg.svd(angle_matrix)
+    R = U @ Vt
+    # Correction pour garantir det(R) = +1 (pas une réflexion)
+    if np.linalg.det(R) < 0:
+        U[:, -1] *= -1
+        R = U @ Vt
+
+    cos_angle = R[0, 0]
+    sin_angle = R[1, 0]
+
+    var_cos = np.max([Q_angle_matrix[0, 0, 0], Q_angle_matrix[1, 1, 1]])
+    var_sin = np.max([Q_angle_matrix[0, 1, 1], Q_angle_matrix[1, 0, 0]])
+
+    return cos_angle, sin_angle, var_cos, var_sin
+
+def reduce_g_rover(prd: np.ndarray, var_prd: np.ndarray, g_rover: np.ndarray, var_g_rover: np.ndarray,
+                   elapsed_time: np.ndarray, constellation_table: np.ndarray,
+                   gnss_table: dict = DEFAULT_GNSS_TABLE, sv_model: bool = False):
+    corr_prd, Q_corr_prd, clock_bias, Q_clock_bias = (
+        clock_bias_correction(prd=prd, var_prd=var_prd, g_rover=g_rover, var_g_rover=var_g_rover,
+                              elapsed_time=elapsed_time, constellation_table=constellation_table, gnss_table=gnss_table,
+                              sv_model=sv_model))
+
+    reduced_g_rover, Q_reduced_g_rover, angle_bias, Q_angle_bias = (
+        angle_bias_correction(prd=corr_prd, Q_prd=Q_corr_prd, g_rover=g_rover, var_g_rover=var_g_rover,
+                              elapsed_time=elapsed_time, constellation_table=constellation_table, gnss_table=gnss_table,
+                              sv_model=sv_model))
+
+    return reduced_g_rover, Q_reduced_g_rover, corr_prd, Q_corr_prd, clock_bias, Q_clock_bias, angle_bias, Q_angle_bias
 
 
 def compute_window(prd: np.ndarray, var_prd: np.ndarray, g_rover: np.ndarray, var_g_rover: np.ndarray,
@@ -325,12 +360,9 @@ def compute_window(prd: np.ndarray, var_prd: np.ndarray, g_rover: np.ndarray, va
         return None
 
     # 1. Reduce G_rover
-    #try:
-    if sv_model:
-        corr_PRD, var_corr_prd, B, b_cov = correc_clock_bias(PRD, var_y, G_rover, var_g, constellation_table, dt, semi_major_axis_table)
-        G_rover, var_G_rover, gamma = reduce_g_rover_dyn(corr_PRD, var_corr_prd, G_rover, var_g, constellation_table, dt, semi_major_axis_table)
-    else:
-        G_rover, gamma = reduce_g_rover(PRD, G_rover, dt)
+    reduced_g_rover, Q_reduced_g_rover, corr_prd, Q_corr_prd, clock_bias, Q_clock_bias, angle_bias, Q_angle_bias = (
+        reduce_g_rover(prd=prd, var_prd=var_prd, g_rover=g_rover, var_g_rover=var_g_rover, elapsed_time=elapsed_time,
+                       constellation_table=constellation_table, gnss_table=gnss_table, sv_model=sv_model))
 
 
 def compute(df: pd.DataFrame, dt: float, min_sv: int = 4, on_cp: bool = True, sv_model: bool = True,
@@ -347,7 +379,7 @@ def compute(df: pd.DataFrame, dt: float, min_sv: int = 4, on_cp: bool = True, sv
     else:
         meas_col = "sd"
 
-    prd_df, var_prd_df = get_between_epoch_prd(df, meas_col=meas_col, var_meas_col="sigma_prd")
+    prd_df, var_prd_df = get_between_epoch_prd(df, meas_col=meas_col, sigma_meas_col="sigma_prd")
 
     ## Compute geometry matrix for each windows of dt seconds
     all_times = prd_df.index.values

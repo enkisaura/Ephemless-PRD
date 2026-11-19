@@ -48,7 +48,7 @@ if __name__ == "__main__":
     run1 = runs[0]
     run2 = runs[1]
     skydel_dt = -18
-    sample_size = 30*60 # seconds
+    sample_size = 10*60 # seconds
 
     sigma_prd = 0.7 # m
     sigma_tacho = 1e-2 # m
