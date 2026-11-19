@@ -97,11 +97,7 @@ def get_between_epoch_prd(df: pd.DataFrame, meas_col: str, sigma_meas_col:str) -
     return prd_pivot, var_prd_pivot
 
 
-def add_sv_model(g_rover: np.ndarray, var_g_rover: np.ndarray, elapsed_time: np.ndarray, semi_major_axis: float) \
-        -> tuple[np.ndarray, np.ndarray]:
-    g_rover = g_rover.copy()
-    var_g_rover = var_g_rover.copy()
-
+def compute_cs(elapsed_time: np.ndarray, semi_major_axis: float) -> tuple[np.ndarray, np.ndarray]:
     # Compute constellation apparent period
     n_sat = np.sqrt(bits.const.NU / (semi_major_axis ** 3))
     n_app = n_sat - bits.const.OMEGA_E
@@ -109,6 +105,16 @@ def add_sv_model(g_rover: np.ndarray, var_g_rover: np.ndarray, elapsed_time: np.
     # Compute c/s coeff
     c_tk = np.cos(n_app * elapsed_time)
     s_tk = np.sin(n_app * elapsed_time)
+
+    return c_tk, s_tk
+
+
+def add_sv_model(g_rover: np.ndarray, var_g_rover: np.ndarray, elapsed_time: np.ndarray, semi_major_axis: float) \
+        -> tuple[np.ndarray, np.ndarray]:
+    g_rover = g_rover.copy()
+    var_g_rover = var_g_rover.copy()
+
+    c_tk, s_tk = compute_cs(elapsed_time, semi_major_axis)
 
     # Compute G_rover for rx1
     c_x = g_rover[:, 0] * c_tk
@@ -292,6 +298,7 @@ def angle_bias_correction(prd: np.ndarray, Q_prd: np.ndarray, g_rover: np.ndarra
 
     return g_rover_corrected, var_g_rover_corrected, a, var_a
 
+
 def compute_angle_between_matrix(M1: np.ndarray, M2: np.ndarray, Q_m1:np.ndarray, Q_m2:np.ndarray) \
         -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
@@ -326,6 +333,7 @@ def compute_angle_between_matrix(M1: np.ndarray, M2: np.ndarray, Q_m1:np.ndarray
 
     return cos_angle, sin_angle, var_cos, var_sin
 
+
 def reduce_g_rover(prd: np.ndarray, var_prd: np.ndarray, g_rover: np.ndarray, var_g_rover: np.ndarray,
                    elapsed_time: np.ndarray, constellation_table: np.ndarray,
                    gnss_table: dict = DEFAULT_GNSS_TABLE, sv_model: bool = False):
@@ -344,7 +352,7 @@ def reduce_g_rover(prd: np.ndarray, var_prd: np.ndarray, g_rover: np.ndarray, va
 
 def compute_window(prd: np.ndarray, var_prd: np.ndarray, g_rover: np.ndarray, var_g_rover: np.ndarray,
                    elapsed_time: np.ndarray, constellation_table:np.ndarray,
-                   gnss_table: dict = DEFAULT_GNSS_TABLE, sv_model: bool = False) -> pd.DataFrame|None:
+                   gnss_table: dict = DEFAULT_GNSS_TABLE, sv_model: bool = False) -> tuple:
     ## Check inputs
     if sv_model and constellation_table is None:
         raise ValueError("Constellation table must be provided for SV model computation")
@@ -360,9 +368,50 @@ def compute_window(prd: np.ndarray, var_prd: np.ndarray, g_rover: np.ndarray, va
         return None
 
     # 1. Reduce G_rover
-    reduced_g_rover, Q_reduced_g_rover, corr_prd, Q_corr_prd, clock_bias, Q_clock_bias, angle_bias, Q_angle_bias = (
+    (reduced_g_rover, Q_reduced_g_rover, _, _,
+     clock_bias_step1, Q_clock_bias_step1, angle_bias, Q_angle_bias) = (
         reduce_g_rover(prd=prd, var_prd=var_prd, g_rover=g_rover, var_g_rover=var_g_rover, elapsed_time=elapsed_time,
                        constellation_table=constellation_table, gnss_table=gnss_table, sv_model=sv_model))
+
+    # 2. Compute geometry matrix
+    # Correct clock bias
+    corr_prd, Q_corr_prd, clock_bias_step2, Q_clock_bias_step2 = (
+        clock_bias_correction(prd=prd, var_prd=var_prd, g_rover=reduced_g_rover, var_g_rover=Q_reduced_g_rover,
+                              elapsed_time=elapsed_time, constellation_table=constellation_table, gnss_table=gnss_table,
+                              sv_model=sv_model))
+
+    geometry_matrix = np.full((prd.shape[1], 2), np.nan)
+    Q_geometry_matrix = np.full((prd.shape[1], 2, 2), np.nan)
+    for gnss_id in np.unique(constellation_table): # Iterate over each GNSS constellation
+        const_mask = (constellation_table == gnss_id)
+        const_prd = corr_prd[:, const_mask]
+        Q_const_prd = Q_corr_prd[const_mask]
+        if sv_model:
+            g_rover_extended, var_g_rover_extended = add_sv_model(reduced_g_rover, Q_reduced_g_rover, elapsed_time,
+                                                                  gnss_table[gnss_id])
+        else:
+            g_rover_extended = reduced_g_rover
+            var_g_rover_extended = Q_reduced_g_rover
+
+        local_G_coeff, local_Q_g_coeff = utils.wtls_2D(const_prd, Q_const_prd, g_rover_extended, var_g_rover_extended)
+
+        if sv_model:
+            c_tk, s_tk = compute_cs(elapsed_time, gnss_table[gnss_id])
+            local_G = c_tk[-1] * local_G_coeff[:, 0:2] + s_tk[-1] * local_G_coeff[:, 2:4]
+            q_g_local_list = []
+            for i in range(local_Q_g_coeff.shape[0]):
+                q_g_local_list.append(c_tk[-1] ** 2 * local_Q_g_coeff[i, 0:2, 0:2]
+                                      + s_tk[-1] ** 2 * local_Q_g_coeff[i, 2:4, 2:4])
+            local_Q_G = np.stack(q_g_local_list)
+        else:
+            local_G = local_G_coeff
+            local_Q_g = local_Q_g_coeff
+
+        geometry_matrix[const_mask] = local_G
+        Q_geometry_matrix[const_mask] = local_Q_G
+
+    return (geometry_matrix, Q_geometry_matrix, angle_bias, Q_angle_bias,
+            clock_bias_step1, Q_clock_bias_step1, clock_bias_step2, Q_clock_bias_step2)
 
 
 def compute(df: pd.DataFrame, dt: float, min_sv: int = 4, on_cp: bool = True, sv_model: bool = True,
@@ -431,8 +480,46 @@ def compute(df: pd.DataFrame, dt: float, min_sv: int = 4, on_cp: bool = True, sv
         elapsed_time_np = bits.convert.time.utc_to_seconds(window_times) / np.timedelta64(1, "s")
 
         # Compute the window
-        result = compute_window(prd=at_epoch_prd_np, var_prd=at_epoch_var_prd_np,
-                                g_rover=at_epoch_g_rover_np, var_g_rover=at_epoch_var_g_rover_np,
-                                elapsed_time=elapsed_time_np,
-                                constellation_table=constellation_table, gnss_table=gnss_table, sv_model=sv_model)
+        try:
+            (geometry_matrix, Q_geometry_matrix, angle_bias, Q_angle_bias,
+             clock_bias_step1, Q_clock_bias_step1, clock_bias_step2, Q_clock_bias_step2) = (
+                compute_window(prd=at_epoch_prd_np, var_prd=at_epoch_var_prd_np,
+                               g_rover=at_epoch_g_rover_np, var_g_rover=at_epoch_var_g_rover_np,
+                               elapsed_time=elapsed_time_np,
+                               constellation_table=constellation_table, gnss_table=gnss_table, sv_model=sv_model))
+        except Exception as e:
+            txt = f"could not compute geometry matrix at {t_start}-{t_end}: {e}"
+            warn(txt)
+            continue
+
+        # Save data
+        time_mask = df["time"] == window_times[-1]
+        window_map = time_mask & (df["sv_id"].isin(sv_list))
+
+        # Map SV line index in the window dataframe with corresponding id from sv_list
+        sv_to_col = {sv_name: i for i, sv_name in enumerate(sv_list)} # map sv_name with sv_list id
+        col_idx = df.loc[time_mask, "sv_id"].map(sv_to_col) # Map dataframe lines with corresponding id from sv_list
+        valid = col_idx.notna() # Find valid SV
+        sv_map_idx = col_idx[valid].astype(int) # Keep only valid SV
+
+        # G
+        df.loc[window_map, "e_x"] = geometry_matrix[sv_map_idx.to_numpy(), 0]
+        df.loc[window_map, "e_y"] = geometry_matrix[sv_map_idx.to_numpy(), 1]
+
+        # Q_G
+        df.loc[window_map, "sigma_e_xx"] = np.sqrt(Q_geometry_matrix[sv_map_idx.to_numpy(), 0, 0])
+        df.loc[window_map, "sigma_e_yy"] = np.sqrt(Q_geometry_matrix[sv_map_idx.to_numpy(), 1, 1])
+        df.loc[window_map, "sigma_e_xy"] = np.sqrt(Q_geometry_matrix[sv_map_idx.to_numpy(), 0, 1])
+
+        # Clock bias
+        df.loc[window_map, "clock_bias_step1"] = clock_bias_step1[-1, 0]
+        df.loc[window_map, "sigma_clock_bias_step1"] = np.sqrt(Q_clock_bias_step1[-1, -1])
+        df.loc[window_map, "clock_bias_step2"] = clock_bias_step2[-1, 0]
+        df.loc[window_map, "sigma_clock_bias_step2"] = np.sqrt(Q_clock_bias_step2[-1, -1])
+
+        # Angle bias
+        df.loc[window_map, "angle_bias"] = angle_bias
+        df.loc[window_map, "sigma_angle_bias"] = np.sqrt(Q_angle_bias)
+
+    return df
 

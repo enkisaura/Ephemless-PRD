@@ -68,6 +68,11 @@ if __name__ == "__main__":
     obs_df = parse.sample(obs_df, sample_size=sample_size, sample_count=10, dump=40)
 
     # Compute G
-    g_df = geometry_matrix.compute(obs_df, dt=sample_size, min_sv=4, on_cp=True, sv_model=True)
+    if True:
+        g_df = geometry_matrix.compute(obs_df, dt=sample_size, min_sv=4, on_cp=True, sv_model=True)
+        g_df.to_pickle(f"{pickle_directory}/g_df.pkl")
+        # exit()
+    else:
+        g_df = pd.read_pickle("g_df.pkl")
 
     print("All done !")
