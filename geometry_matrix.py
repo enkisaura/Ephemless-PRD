@@ -431,6 +431,7 @@ def compute(df: pd.DataFrame, dt: float, min_sv: int = 4, on_cp: bool = True, sv
     prd_df, var_prd_df = get_between_epoch_prd(df, meas_col=meas_col, sigma_meas_col="sigma_prd")
 
     ## Compute geometry matrix for each windows of dt seconds
+    report = {"time": [], "error": [], "txt": []} # Initialize report
     all_times = prd_df.index.values
     n_times_total = len(all_times)
     delta = np.timedelta64(dt, "s")
@@ -488,7 +489,11 @@ def compute(df: pd.DataFrame, dt: float, min_sv: int = 4, on_cp: bool = True, sv
                                elapsed_time=elapsed_time_np,
                                constellation_table=constellation_table, gnss_table=gnss_table, sv_model=sv_model))
         except Exception as e:
-            txt = f"could not compute geometry matrix at {t_start}-{t_end}: {e}"
+            txt = f"Could not compute geometry matrix at {t_start}-{t_end}: {e}"
+            report = {"time": [], "error": [], "txt": []}
+            report["time"].append(f"{t_start}-{t_end}")
+            report["error"].append(e)
+            report["txt"].append(txt)
             warn(txt)
             continue
 
@@ -507,9 +512,9 @@ def compute(df: pd.DataFrame, dt: float, min_sv: int = 4, on_cp: bool = True, sv
         df.loc[window_map, "e_y"] = geometry_matrix[sv_map_idx.to_numpy(), 1]
 
         # Q_G
-        df.loc[window_map, "sigma_e_xx"] = np.sqrt(Q_geometry_matrix[sv_map_idx.to_numpy(), 0, 0])
-        df.loc[window_map, "sigma_e_yy"] = np.sqrt(Q_geometry_matrix[sv_map_idx.to_numpy(), 1, 1])
-        df.loc[window_map, "sigma_e_xy"] = np.sqrt(Q_geometry_matrix[sv_map_idx.to_numpy(), 0, 1])
+        df.loc[window_map, "var_e_xx"] = Q_geometry_matrix[sv_map_idx.to_numpy(), 0, 0]
+        df.loc[window_map, "var_e_yy"] = Q_geometry_matrix[sv_map_idx.to_numpy(), 1, 1]
+        df.loc[window_map, "var_e_xy"] = Q_geometry_matrix[sv_map_idx.to_numpy(), 0, 1]
 
         # Clock bias
         df.loc[window_map, "clock_bias_step1"] = clock_bias_step1[-1, 0]
@@ -521,5 +526,5 @@ def compute(df: pd.DataFrame, dt: float, min_sv: int = 4, on_cp: bool = True, sv
         df.loc[window_map, "angle_bias"] = angle_bias
         df.loc[window_map, "sigma_angle_bias"] = np.sqrt(Q_angle_bias)
 
-    return df
+    return df, report
 

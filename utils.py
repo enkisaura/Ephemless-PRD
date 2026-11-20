@@ -1,5 +1,6 @@
 from typing import Tuple
 import numpy as np
+import csv
 
 def vectorize(M:np.ndarray) -> tuple[np.ndarray, float, float]:
     """
@@ -151,3 +152,18 @@ def cov_mediane(Q: list|np.ndarray) -> np.ndarray:
 def cov_arctan2(a, b, var_a, var_b, cov_ab=0.0):
     r2 = a**2 + b**2
     return (b**2 * var_a + a**2 * var_b - 2 * a * b * cov_ab) / r2**2
+
+
+def save_dict_to_csv(d:dict, filepath:str):
+    with open(filepath, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["key", "value"])
+        writer.writerows(d.items())
+
+
+def load_dict_from_csv(filepath:str) -> dict:
+    with open(filepath, newline="", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        next(reader)
+        d = dict(reader)
+    return d

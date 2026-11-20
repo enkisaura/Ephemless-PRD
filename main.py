@@ -4,6 +4,7 @@ import os
 
 import parse
 import geometry_matrix
+import utils
 
 def get_obs(rx1_folder_path, rx2_folder_path, obs_file_name:str="obs.rnx", sigma_prd:float=0.7,
             rmc_file_name:str="nmea_simulator.txt", dt:float=0.0,
@@ -43,12 +44,12 @@ def get_obs(rx1_folder_path, rx2_folder_path, obs_file_name:str="obs.rnx", sigma
 
 if __name__ == "__main__":
     main_folder = "/home/enki/Documents/ephemless_data"
-    pickle_directory = "pickle"
+    pickle_directory = "output"
     runs = ["3ms", "10ms", "30ms"]
     run1 = runs[0]
     run2 = runs[1]
     skydel_dt = -18
-    sample_size = 10*60 # seconds
+    sample_size = 30*60 # seconds
 
     sigma_prd = 0.7 # m
     sigma_tacho = 1e-2 # m
@@ -65,12 +66,13 @@ if __name__ == "__main__":
     obs_df = get_obs(rx1_folder_path, rx2_folder_path, sigma_prd=sigma_prd, dt=skydel_dt,
                      tacho_quant=sigma_tacho, heading_quant=sigma_heading, sensor_filetype="rmc")
 
-    obs_df = parse.sample(obs_df, sample_size=sample_size, sample_count=10, dump=40)
+    obs_df = parse.sample(obs_df, sample_size=sample_size, sample_count=5*60, dump=5*60)
 
     # Compute G
     if True:
-        g_df = geometry_matrix.compute(obs_df, dt=sample_size, min_sv=4, on_cp=True, sv_model=True)
+        g_df, report = geometry_matrix.compute(obs_df, dt=sample_size, min_sv=4, on_cp=True, sv_model=True)
         g_df.to_pickle(f"{pickle_directory}/g_df.pkl")
+        utils.save_dict_to_csv(report, f"{pickle_directory}/g_df_report.csv")
         # exit()
     else:
         g_df = pd.read_pickle("g_df.pkl")
