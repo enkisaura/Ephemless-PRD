@@ -1,8 +1,5 @@
-from typing import Literal
-import pandas as pd
 import os
 
-import parse
 import geometry_matrix
 import utils
 from main import get_obs
@@ -48,7 +45,7 @@ if __name__ == "__main__":
         # TODO Fait un effort... c'est juste ici |
         "output_folder": "output",
         # Main params
-        "skydel_dt": -18,
+        "skydel_dt": -18, # s
         # Standard deviation
         "sigma_prd": 0.7,  # m
         "sigma_tacho": 1e-2,  # m

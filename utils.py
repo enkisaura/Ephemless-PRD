@@ -1,6 +1,7 @@
 from typing import Tuple
 import numpy as np
 import csv
+from scipy.linalg import cho_factor, cho_solve
 
 def vectorize(M:np.ndarray) -> tuple[np.ndarray, float, float]:
     """
@@ -42,7 +43,53 @@ def ols(G:np.ndarray, Y: np.ndarray) -> np.ndarray:
     return np.linalg.inv(G.transpose() @ G) @ G.transpose() @ Y
 
 
-def wtls(Y:np.ndarray, Q_y:np.ndarray, G:np.ndarray, Q_g:np.ndarray, threshold=1e-4, max_iterations=20) \
+def wtls(Y: np.ndarray, Q_y: np.ndarray, G: np.ndarray, Q_g: np.ndarray,
+         threshold: float = 1e-4, max_iterations: int = 20
+         ) -> tuple[np.ndarray, np.ndarray]:
+    """Q_g : (n, m) variances de chaque élément de G, ou (n*m, n*m) covariance pleine de vec(G)."""
+    y = np.asarray(Y, float).ravel()
+    G = np.asarray(G, float)
+    Q_g = np.asarray(Q_g, float)
+    n, m = G.shape
+    diag = Q_g.shape == (n, m)
+    if not diag:
+        Qg4 = Q_g.reshape(m, n, m, n)          # Qg4[j, i, k, l] = Cov(G[i, j], G[l, k])
+
+    def corrections(x):
+        r = y - G @ x
+        if diag:
+            Q = Q_y + np.diag(Q_g @ x**2)
+        else:
+            T = np.tensordot(Qg4, x, axes=([2], [0]))   # blocs de Q_g X
+            Q = Q_y + np.tensordot(x, T, axes=1)         # Xᵀ Q_g X
+        cQ = cho_factor(Q)
+        lam = cho_solve(cQ, r)
+        E_g = -Q_g * np.outer(lam, x) if diag else -(T @ lam).T
+        return r, cQ, lam, E_g
+
+    WG = cho_solve(cho_factor(Q_y), G)
+    x = np.linalg.solve(G.T @ WG, WG.T @ y)
+
+    for _ in range(max_iterations):
+        _, cQ, _, E_g = corrections(x)
+        G_hat = G - E_g
+        WG = cho_solve(cQ, G_hat)
+        x_new = np.linalg.solve(G_hat.T @ WG, WG.T @ (y - E_g @ x))
+        converged = np.linalg.norm(x_new - x) < threshold
+        x = x_new
+        if converged:
+            break
+
+    r, cQ, lam, E_g = corrections(x)
+    G_hat = G - E_g
+    N = G_hat.T @ cho_solve(cQ, G_hat)
+    sigma_2 = (r @ lam) / (n - m)
+    Q_x = sigma_2 * cho_solve(cho_factor(N), np.eye(m))
+
+    return (x[:, None] if np.ndim(Y) == 2 else x), Q_x
+
+
+def old_wtls(Y:np.ndarray, Q_y:np.ndarray, G:np.ndarray, Q_g:np.ndarray, threshold=1e-4, max_iterations=20) \
         -> Tuple[np.ndarray, np.ndarray]:
     """
     Optimized with Claude AI.
