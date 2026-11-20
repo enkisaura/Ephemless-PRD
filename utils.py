@@ -33,6 +33,15 @@ def reshape(V:np.ndarray, n:float, m:float) -> np.ndarray:
     return V.reshape((n, m), order="F")
 
 
+def ols(G:np.ndarray, Y: np.ndarray) -> np.ndarray:
+    """
+    Y = G @ X
+    X = (G.T @ G)-1 @ G.T @ Y
+    Returns: X
+    """
+    return np.linalg.inv(G.transpose() @ G) @ G.transpose() @ Y
+
+
 def wtls(Y:np.ndarray, Q_y:np.ndarray, G:np.ndarray, Q_g:np.ndarray, threshold=1e-4, max_iterations=20) \
         -> Tuple[np.ndarray, np.ndarray]:
     """
@@ -154,16 +163,18 @@ def cov_arctan2(a, b, var_a, var_b, cov_ab=0.0):
     return (b**2 * var_a + a**2 * var_b - 2 * a * b * cov_ab) / r2**2
 
 
-def save_dict_to_csv(d:dict, filepath:str):
+def save_dict_to_csv(d: dict, filepath: str):
     with open(filepath, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["key", "value"])
-        writer.writerows(d.items())
+        writer.writerow(d.keys())
+        writer.writerows(zip(*d.values()))
 
 
-def load_dict_from_csv(filepath:str) -> dict:
+def load_dict_from_csv(filepath: str) -> dict:
     with open(filepath, newline="", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        next(reader)
-        d = dict(reader)
+        reader = csv.DictReader(f)
+        d = {k: [] for k in reader.fieldnames}
+        for row in reader:
+            for k, v in row.items():
+                d[k].append(v)
     return d

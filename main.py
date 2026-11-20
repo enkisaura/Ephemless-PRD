@@ -66,7 +66,7 @@ if __name__ == "__main__":
     obs_df = get_obs(rx1_folder_path, rx2_folder_path, sigma_prd=sigma_prd, dt=skydel_dt,
                      tacho_quant=sigma_tacho, heading_quant=sigma_heading, sensor_filetype="rmc")
 
-    obs_df = parse.sample(obs_df, sample_size=sample_size, sample_count=5*60, dump=5*60)
+    obs_df = parse.sample(obs_df, sample_size=sample_size, sample_count=5, dump=5*60)
 
     # Compute G
     if True:
@@ -75,6 +75,6 @@ if __name__ == "__main__":
         utils.save_dict_to_csv(report, f"{pickle_directory}/g_df_report.csv")
         # exit()
     else:
-        g_df = pd.read_pickle("g_df.pkl")
+        g_df = pd.read_pickle(f"{pickle_directory}/g_df.pkl")
 
     print("All done !")

@@ -152,6 +152,23 @@ def add_sv_model(g_rover: np.ndarray, var_g_rover: np.ndarray, elapsed_time: np.
     return g_rover_sv_model.transpose(), var_g_rover_sv_model.transpose()
 
 
+def g_from_sv_model(g_coeff: np.ndarray, Q_g_coeff: np.ndarray, elapsed_time: np.ndarray, semi_major_axis: float) \
+        -> np.ndarray:
+    c_tk, s_tk = compute_cs(elapsed_time, semi_major_axis)
+
+    # Geometry matrix
+    g = c_tk[-1] * g_coeff[:, 0:2] + s_tk[-1] * g_coeff[:, 2:4]
+
+    # Covariance matrix
+    q_g_list = []
+    for i in range(Q_g_coeff.shape[0]):
+        local_q_g = c_tk[-1] ** 2 * Q_g_coeff[i, 0:2, 0:2] + s_tk[-1] ** 2 * Q_g_coeff[i, 2:4, 2:4]
+        q_g_list.append(local_q_g)
+    Q_g = np.stack(q_g_list)
+
+    return g, Q_g
+
+
 def add_rx_clock_model(g_rover: np.ndarray, var_g_rover: np.ndarray, elapsed_time: np.ndarray) \
         -> tuple[np.ndarray, np.ndarray]:
     g_rover = g_rover.copy()
@@ -350,6 +367,49 @@ def reduce_g_rover(prd: np.ndarray, var_prd: np.ndarray, g_rover: np.ndarray, va
     return reduced_g_rover, Q_reduced_g_rover, corr_prd, Q_corr_prd, clock_bias, Q_clock_bias, angle_bias, Q_angle_bias
 
 
+def find_outliers(prd: np.ndarray, g_rover: np.ndarray, elapsed_time: np.ndarray, constellation_table:np.ndarray,
+                  gnss_table: dict = DEFAULT_GNSS_TABLE, sv_model: bool = False, tolerance: float = 10.0) \
+        -> np.ndarray:
+    g = quick_solve(prd=prd, g_rover=g_rover, elapsed_time=elapsed_time,
+                    constellation_table=constellation_table, gnss_table=gnss_table, sv_model=sv_model)
+
+    norm = np.linalg.norm(g, axis=1) # Should be equal to 1
+
+    return norm < tolerance
+
+
+def quick_solve(prd: np.ndarray, g_rover: np.ndarray, elapsed_time: np.ndarray, constellation_table:np.ndarray,
+                gnss_table: dict = DEFAULT_GNSS_TABLE, sv_model: bool = False) -> np.ndarray:
+    g_list = []
+    for gnss_id in np.unique(constellation_table): # Iterate over each GNSS constellation
+        # Get const measurements
+        const_mask = (constellation_table == gnss_id)
+        const_prd = prd[:, const_mask]
+
+        # Add sv model
+        if sv_model:
+            g_rover_extended, _ = add_sv_model(g_rover, np.ones_like(g_rover), elapsed_time, gnss_table[gnss_id])
+
+        # Add clock model
+        g_rover_extended, _ = add_rx_clock_model(g_rover, np.ones_like(g_rover), elapsed_time)
+
+        # Compute geometry matrix
+        const_g = utils.ols(g_rover_extended, const_prd).transpose()
+
+        # Translate sv coeff to geometry matrix
+        if sv_model:
+            const_g, _ = g_from_sv_model(const_g, np.array([np.eye(const_prd.shape[1])]), elapsed_time, gnss_table[gnss_id])
+        else:
+            const_g = const_g[:, 0:2]
+
+        # Save result
+        g_list.append(const_g)
+
+    geometry_matrix = np.vstack(g_list)
+
+    return geometry_matrix
+
+
 def compute_window(prd: np.ndarray, var_prd: np.ndarray, g_rover: np.ndarray, var_g_rover: np.ndarray,
                    elapsed_time: np.ndarray, constellation_table:np.ndarray,
                    gnss_table: dict = DEFAULT_GNSS_TABLE, sv_model: bool = False) -> tuple:
@@ -396,26 +456,20 @@ def compute_window(prd: np.ndarray, var_prd: np.ndarray, g_rover: np.ndarray, va
         local_G_coeff, local_Q_g_coeff = utils.wtls_2D(const_prd, Q_const_prd, g_rover_extended, var_g_rover_extended)
 
         if sv_model:
-            c_tk, s_tk = compute_cs(elapsed_time, gnss_table[gnss_id])
-            local_G = c_tk[-1] * local_G_coeff[:, 0:2] + s_tk[-1] * local_G_coeff[:, 2:4]
-            q_g_local_list = []
-            for i in range(local_Q_g_coeff.shape[0]):
-                q_g_local_list.append(c_tk[-1] ** 2 * local_Q_g_coeff[i, 0:2, 0:2]
-                                      + s_tk[-1] ** 2 * local_Q_g_coeff[i, 2:4, 2:4])
-            local_Q_G = np.stack(q_g_local_list)
+            local_G, local_Q_g = g_from_sv_model(local_G_coeff, local_Q_g_coeff, elapsed_time, gnss_table[gnss_id])
         else:
             local_G = local_G_coeff
             local_Q_g = local_Q_g_coeff
 
         geometry_matrix[const_mask] = local_G
-        Q_geometry_matrix[const_mask] = local_Q_G
+        Q_geometry_matrix[const_mask] = local_Q_g
 
     return (geometry_matrix, Q_geometry_matrix, angle_bias, Q_angle_bias,
             clock_bias_step1, Q_clock_bias_step1, clock_bias_step2, Q_clock_bias_step2)
 
 
 def compute(df: pd.DataFrame, dt: float, min_sv: int = 4, on_cp: bool = True, sv_model: bool = True,
-            gnss_table: dict = DEFAULT_GNSS_TABLE) -> pd.DataFrame:
+            gnss_table: dict = DEFAULT_GNSS_TABLE, g_norm_tolerance: float = 10.0) -> pd.DataFrame:
     ## Clean up
     df = df.sort_values(by=["time", "gnss_id_rx1"]).reset_index(drop=True)
 
@@ -467,10 +521,16 @@ def compute(df: pd.DataFrame, dt: float, min_sv: int = 4, on_cp: bool = True, sv
         constellation_table = []
         for sv_id in sv_list:
             constellation_table.append(sv_id[:3])
+
         constellation_table = np.array(constellation_table)
 
         # Check if window is solvable
         if len(sv_list) <= min_sv or len(sv_list) < at_epoch_g_rover_np.shape[1]:
+            txt = f"Could not compute geometry matrix at {t_start}-{t_end}: not enough measurements."
+            report["time"].append(f"{t_start}-{t_end}")
+            report["error"].append("not enough measurements")
+            report["txt"].append(txt)
+            warn(txt)
             continue
 
         # Extract PRD matrix with only valid SV
@@ -479,6 +539,25 @@ def compute(df: pd.DataFrame, dt: float, min_sv: int = 4, on_cp: bool = True, sv
 
         # Extract timestamps in elapsed time format
         elapsed_time_np = bits.convert.time.utc_to_seconds(window_times) / np.timedelta64(1, "s")
+
+        # Get rid of outliers
+        outliers_mask = find_outliers(prd=at_epoch_prd_np, g_rover=at_epoch_g_rover_np, elapsed_time=elapsed_time_np,
+                                      constellation_table=constellation_table, gnss_table=gnss_table, sv_model=sv_model,
+                                      tolerance=g_norm_tolerance)
+
+        if outliers_mask.sum() < min_sv:
+            txt = f"Could not compute geometry matrix at {t_start}-{t_end}: too many outliers."
+            report["time"].append(f"{t_start}-{t_end}")
+            report["error"].append("too many outliers")
+            report["txt"].append(txt)
+            warn(txt)
+            continue
+
+        # Delete outliers
+        at_epoch_prd_np = at_epoch_prd_np[:, outliers_mask]
+        at_epoch_var_prd_np = at_epoch_var_prd_np[:, outliers_mask]
+        constellation_table = constellation_table[outliers_mask]
+        sv_list = [x for x, m in zip(sv_list, outliers_mask) if m]
 
         # Compute the window
         try:
@@ -490,7 +569,6 @@ def compute(df: pd.DataFrame, dt: float, min_sv: int = 4, on_cp: bool = True, sv
                                constellation_table=constellation_table, gnss_table=gnss_table, sv_model=sv_model))
         except Exception as e:
             txt = f"Could not compute geometry matrix at {t_start}-{t_end}: {e}"
-            report = {"time": [], "error": [], "txt": []}
             report["time"].append(f"{t_start}-{t_end}")
             report["error"].append(e)
             report["txt"].append(txt)
