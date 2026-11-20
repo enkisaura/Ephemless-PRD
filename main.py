@@ -49,7 +49,7 @@ if __name__ == "__main__":
     run1 = runs[0]
     run2 = runs[1]
     skydel_dt = -18
-    sample_size = 30*60 # seconds
+    sample_size = 20*60 # seconds
 
     sigma_prd = 0.7 # m
     sigma_tacho = 1e-2 # m
@@ -66,12 +66,12 @@ if __name__ == "__main__":
     obs_df = get_obs(rx1_folder_path, rx2_folder_path, sigma_prd=sigma_prd, dt=skydel_dt,
                      tacho_quant=sigma_tacho, heading_quant=sigma_heading, sensor_filetype="rmc")
 
-    obs_df = parse.sample(obs_df, sample_size=sample_size, sample_count=5, dump=5*60)
+    obs_df = parse.sample(obs_df, sample_size=sample_size, sample_count=5, dump=5 * 60)
 
     # Compute G
     if True:
-        g_df, report = geometry_matrix.compute(obs_df, dt=sample_size, min_sv=4, on_cp=True, sv_model=True)
-        g_df.to_pickle(f"{pickle_directory}/g_df.pkl")
+        g_df, report = geometry_matrix.compute(obs_df, dt=sample_size, min_sv=4, on_cp=True, sv_model=True, g_norm_tolerance=400)
+        g_df.to_csv(f"{pickle_directory}/g_df.csv")
         utils.save_dict_to_csv(report, f"{pickle_directory}/g_df_report.csv")
         # exit()
     else:

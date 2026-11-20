@@ -60,9 +60,10 @@ def compute_window(group:pd.DataFrame) -> pd.DataFrame:
 if __name__ == "__main__":
     main_folder = "/home/enki/Documents/ephemless_data"
     pickle_directory = "output"
-    df_name = "sv_30_60_g_df.pkl"
+    df_name = "g_df.csv"
 
-    df = pd.read_pickle(f"{pickle_directory}/{df_name}")
+    #df = pd.read_pickle(f"{pickle_directory}/{df_name}")
+    df = pd.read_csv(f"{pickle_directory}/{df_name}", parse_dates=["time"])
 
     df = df.dropna(subset=["e_x", "e_y"], how="all")
 
